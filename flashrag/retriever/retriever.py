@@ -594,6 +594,7 @@ class MultiRetrieverRouter:
             config["multi_retriever_setting"]["device"] = config["device"]
             self.reranker = get_reranker(config["multi_retriever_setting"])
 
+
     def load_all_retriever(self, config):
         retriever_config_list = config["multi_retriever_setting"]["retriever_list"]
         # use the same corpus for efficient memory usage
@@ -640,22 +641,26 @@ class MultiRetrieverRouter:
 
         return retriever_list
 
-    def add_source(self, result: Union[list, tuple], retriever):
+    def add_source(self, result: Union[list, tuple], retriever, scores=None):
         retrieval_method = retriever.retrieval_method
         corpus_path = retriever.corpus_path
         is_multimodal = isinstance(retriever, MultiModalRetriever)
-        # for naive search, result is a list of dict, each repr a doc
-        # for batch search, result is a list of list, each repr a doc list(per query)
-        for item in result:
+
+        def add_metadata(item, score=None):
+            item.update({"source": retrieval_method, "corpus_path": corpus_path, "is_multimodal": is_multimodal})
+            if score is not None:
+                item.setdefault("metadata", {})[f"{retrieval_method}_score"] = float(score)
+
+        # Handle both single and batch results with scores
+        for i, item in enumerate(result):
             if isinstance(item, list):
-                for _item in item:
-                    _item["source"] = retrieval_method
-                    _item["corpus_path"] = corpus_path
-                    _item["is_multimodal"] = is_multimodal
+                for j, doc in enumerate(item):
+                    score = scores[i][j] if scores and i < len(scores) and j < len(scores[i]) else None
+                    add_metadata(doc, score)
             else:
-                item["source"] = retrieval_method
-                item["corpus_path"] = corpus_path
-                item["is_multimodal"] = is_multimodal
+                score = scores[i] if scores and i < len(scores) else None
+                add_metadata(item, score)
+
         return result
 
     def _search_or_batch_search(self, query: Union[str, list], target_modal, num, return_score, method, retriever_list):
@@ -683,7 +688,7 @@ class MultiRetrieverRouter:
                 result = output
                 score = None
 
-            result = self.add_source(result, retriever)
+            result = self.add_source(result, retriever, score)
             return result, score
 
         with ThreadPoolExecutor(max_workers=4) as executor:
@@ -763,11 +768,11 @@ class MultiRetrieverRouter:
                     "Using multiple corpus may lead to conflicts in DOC IDs, which may result in incorrect rrf results!"
                 )
             if isinstance(result_list[0], dict):
-                result_list, score_list = self.rrf_merge([result_list], num, k=60)
+                result_list, score_list = self.rrf_merge([result_list], [score_list], topk=num, k=60)
                 result_list = result_list[0]
                 score_list = score_list[0]
             else:
-                result_list, score_list = self.rrf_merge(result_list, num, k=60)
+                result_list, score_list = self.rrf_merge(result_list, score_list, topk=num, k=60)
             return result_list, score_list
         elif self.merge_method == "rerank":
             if isinstance(result_list[0], dict):
@@ -786,12 +791,13 @@ class MultiRetrieverRouter:
         else:
             raise NotImplementedError
 
-    def rrf_merge(self, results, topk=10, k=60):
+    def rrf_merge(self, results, score_lists=None, topk=10, k=60):
         """
         Perform Reciprocal Rank Fusion (RRF) on retrieval results.
 
         Args:
             results (list of list of dict): Retrieval results for multiple queries.
+            score_lists (list of list of float): Original scores from each retriever (unused, kept for compatibility).
             topk (int): Number of top results to return per query.
             k (int): RRF hyperparameter to adjust rank contribution.
 
@@ -805,12 +811,19 @@ class MultiRetrieverRouter:
             score_dict = {}
             retriever_result_dict = {}
             id2item = {}
+
             for item in query_results:
                 source = item["source"]
-                if source not in retriever_result_dict:
-                    retriever_result_dict[source] = []
-                retriever_result_dict[source].append(item["id"])
-                id2item[item["id"]] = item
+                doc_id = item["id"]
+
+                retriever_result_dict.setdefault(source, []).append(doc_id)
+
+                if doc_id in id2item:
+                    # Merge metadata for duplicate documents
+                    if "metadata" in item:
+                        id2item[doc_id].setdefault("metadata", {}).update(item["metadata"])
+                else:
+                    id2item[doc_id] = item
 
             # Calculate RRF scores for each document
             for retriever, retriever_result in retriever_result_dict.items():
