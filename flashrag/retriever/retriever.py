@@ -394,6 +394,7 @@ class DenseRetriever(BaseTextRetriever):
                 use_fp16=self.use_fp16,
                 instruction=self.instruction,
                 silent=self.silent,
+                device=self._config.get("device", None),
             )
         else:
             # check pooling method

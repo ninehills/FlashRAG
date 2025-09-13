@@ -100,7 +100,7 @@ class STEncoder:
             Encodes a list of queries into embeddings using multiple GPUs.
     """
 
-    def __init__(self, model_name, model_path, max_length, use_fp16, instruction, silent=False):
+    def __init__(self, model_name, model_path, max_length, use_fp16, instruction, silent=False, device=None):
         import torch
         from sentence_transformers import SentenceTransformer
 
@@ -110,8 +110,12 @@ class STEncoder:
         self.use_fp16 = use_fp16
         self.instruction = instruction
         self.silent = silent
+        self.device = device
         self.model = SentenceTransformer(
-            model_path, trust_remote_code=True, model_kwargs={"torch_dtype": torch.float16 if use_fp16 else torch.float}
+            model_path,
+            trust_remote_code=True,
+            device=device,
+            model_kwargs={"torch_dtype": torch.float16 if use_fp16 else torch.float}
         )
 
     @torch.inference_mode()
